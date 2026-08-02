@@ -1,13 +1,11 @@
 package main
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -35,51 +33,57 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
-
 	const maxMemory = 10 << 20
 
 	r.ParseMultipartForm(maxMemory)
 
-	uploadFile, header, err := r.FormFile("thumbnail")
+	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to parse form file", err)
 		return
 	}
-	defer uploadFile.Close()
+	defer file.Close()
 
-	mediaType := header.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid Content-Type", err)
+		return
+	}
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "invalid file type", nil)
+		return
+	}
+
+	assetPath := getAssetPath(videoID, mediaType)
+	assetDiskPath := cfg.getAssetDiskPath(assetPath)
+
+	dst, err := os.Create(assetDiskPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to create file on server", err)
+		return
+	}
+	defer dst.Close()
+	if _, err = io.Copy(dst, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error saving file", err)
+		return
+	}
+
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			respondWithError(w, http.StatusNotFound, "video not found", err)
-			return
-		}
-		respondWithError(w, http.StatusInternalServerError, "error fetching video data", err)
+		respondWithError(w, http.StatusInternalServerError, "couldn't find video", err)
 		return
 	}
-	if userID != video.UserID {
-		respondWithError(w, http.StatusUnauthorized, "no permission", nil)
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "not authorized to update this video", nil)
 		return
 	}
 
-	filename := video.ID.String() + "." + filepath.Base(mediaType)
-	filePath := filepath.Join(cfg.assetsRoot, filename)
-	thumbnailURL := fmt.Sprintf("http://localhost:%s/", cfg.port) + filePath
-	newFile, err := os.Create(filePath)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error uploading thumbnail", err)
-		return
-	}
-	if _, err := io.Copy(newFile, uploadFile); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error uploading thumbnail", err)
-	}
-
-	video.ThumbnailURL = &thumbnailURL
+	url := cfg.getAssetURL(assetPath)
+	video.ThumbnailURL = &url
 
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error writing to server", err)
+		respondWithError(w, http.StatusInternalServerError, "couldn't update video", err)
 		return
 	}
 
