@@ -2,11 +2,12 @@ package main
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -40,19 +41,14 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	r.ParseMultipartForm(maxMemory)
 
-	file, header, err := r.FormFile("thumbnail")
+	uploadFile, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to parse form file", err)
 		return
 	}
-	defer file.Close()
+	defer uploadFile.Close()
 
 	mediaType := header.Header.Get("Content-Type")
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error uploading image", err)
-		return
-	}
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -67,10 +63,19 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dataString := base64.StdEncoding.EncodeToString(fileData)
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, dataString)
+	filename := video.ID.String() + "." + filepath.Base(mediaType)
+	filePath := filepath.Join(cfg.assetsRoot, filename)
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/", cfg.port) + filePath
+	newFile, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error uploading thumbnail", err)
+		return
+	}
+	if _, err := io.Copy(newFile, uploadFile); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error uploading thumbnail", err)
+	}
 
-	video.ThumbnailURL = &dataURL
+	video.ThumbnailURL = &thumbnailURL
 
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
