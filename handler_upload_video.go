@@ -13,6 +13,7 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
+	// identify video ID value from request
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
 	if err != nil {
@@ -20,6 +21,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// authenticate user
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
@@ -32,20 +34,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	
-		video, err := cfg.db.GetVideo(videoID)
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "couldn't find video", err)
-			return
-		}
-		if video.UserID != userID {
-			respondWithError(w, http.StatusUnauthorized, "not authorized to update this video", nil)
-			return
-		}
+	// check that user has permission to edit video
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "couldn't find video", err)
+		return
+	}
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "not authorized to update this video", nil)
+		return
+	}
 
 	fmt.Println("uploading video file with id", videoID, "by user", userID)
 
+	// max upload: 1GB
 	const maxUploadSize = 1 << 30
 
+	// read video file upload up to maximum size
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 
 	file, header, err := r.FormFile("video")
@@ -55,6 +60,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	defer file.Close()
 
+	// get media type of file and ensure it is a valid filetype
 	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "invalid Content-Type", err)
@@ -65,8 +71,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	assetPath := getAssetPath(mediaType)
-
+	// generate temporary file in local filesystem
 	dst, err := os.CreateTemp("", "tubely_upload.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to create file on server", err)
@@ -78,11 +83,21 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "error saving file", err)
 		return
 	}
+	
+	// generate s3 file key
+	assetPath := getAssetPath(mediaType)
+	videoType, err := getVideoAspectRatio(dst.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error parsing video dimensions", err)
+		return
+	}
+	key := videoType + "/" + assetPath
 
+	// upload video file to s3
 	dst.Seek(0, io.SeekStart)
 	params := s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
-		Key: &assetPath,
+		Key: &key,
 		Body: dst,
 		ContentType: &mediaType,
 	}
@@ -92,7 +107,8 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	url := cfg.getVideoURL(assetPath)
+	// update video URL information in database
+	url := cfg.getVideoURL(key)
 	video.VideoURL = &url
 
 	err = cfg.db.UpdateVideo(video)
@@ -102,5 +118,4 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
-
 }
