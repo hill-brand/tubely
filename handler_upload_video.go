@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +33,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
-	
+
 	// check that user has permission to edit video
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -74,31 +74,42 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	// generate temporary file in local filesystem
 	dst, err := os.CreateTemp("", "tubely_upload.mp4")
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to create file on server", err)
+		respondWithError(w, http.StatusInternalServerError, "error processing video", err)
 		return
 	}
 	defer os.Remove(dst.Name())
 	defer dst.Close()
 	if _, err = io.Copy(dst, file); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error saving file", err)
+		respondWithError(w, http.StatusInternalServerError, "error processing video", err)
 		return
 	}
-	
+
+	// process video for fast start using ffmpeg
+	processedVideoPath, err := processVideoForFastStart(dst.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error processing video", err)
+		return
+	}
+
 	// generate s3 file key
 	assetPath := getAssetPath(mediaType)
-	videoType, err := getVideoAspectRatio(dst.Name())
+	videoType, err := getVideoAspectRatio(processedVideoPath)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error parsing video dimensions", err)
+		respondWithError(w, http.StatusInternalServerError, "error processing video", err)
 		return
 	}
 	key := videoType + "/" + assetPath
 
 	// upload video file to s3
-	dst.Seek(0, io.SeekStart)
+	pVideo, err := os.Open(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error processing video", err)
+		return
+	}
 	params := s3.PutObjectInput{
-		Bucket: &cfg.s3Bucket,
-		Key: &key,
-		Body: dst,
+		Bucket:      &cfg.s3Bucket,
+		Key:         &key,
+		Body:        pVideo,
 		ContentType: &mediaType,
 	}
 	_, err = cfg.s3Client.PutObject(r.Context(), &params)

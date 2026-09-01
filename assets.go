@@ -79,3 +79,12 @@ func mediaTypeToExt(mediaType string) string {
 	}
 	return "." + parts[1]
 }
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := filePath + ".processing"
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputPath)
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return outputPath, nil
+}
